@@ -34,7 +34,7 @@ fdir <- "Z:\\DEC\\Prescribed_Bushfire_Outcomes_2018-134\\DATA\\Working\\ts.Model
 gdir <- "Z:\\DEC\\Prescribed_Bushfire_Outcomes_2018-134\\DATA\\Working\\ts.Model\\plots.s2a\\graphs\\"
 vdir <- "Z:\\DEC\\Prescribed_Bushfire_Outcomes_2018-134\\DATA\\Working\\ts.Model\\"
 
-#df <- readRDS(paste0(fdir, "site.var.s2.2021-05-14"))
+df <- readRDS(paste0(fdir, "site.var.s2.2021-05-14"))
 df$OzCBI <- as.numeric(df$OzCBI)
 
 df.rm <- read.csv(paste0(vdir, "data-record\\outliers.csv"))
