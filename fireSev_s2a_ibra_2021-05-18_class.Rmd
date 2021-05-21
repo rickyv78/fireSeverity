@@ -1,0 +1,995 @@
+---
+title: "OzCBI fire severity using Sentinel satellite data"
+author: "Densmore. V, Fontaine. J and van Dongen. R"
+date: "15 May 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE,  warning=FALSE}
+#load libraries
+library(tidyverse)
+library(caret)
+library(broom)
+library(kableExtra)
+library(lubridate)
+library(sf)
+library(raster)
+library(rpart)
+library(rpart.plot)
+
+options(scipen=999) # remove scientific notation
+
+dropOutliers <- F
+make.graphs <- T
+recalc.models <- T
+version.date <- "2021-05-20"
+day.buffer <- 60
+
+rf.num <- 10# number of folds in the training data
+rf.rep <- 5
+
+# set paths and load data
+mdir <- "Z:\\DEC\\Prescribed_Bushfire_Outcomes_2018-134\\DATA\\Working\\ts.Model\\models\\"
+fdir <- "Z:\\DEC\\Prescribed_Bushfire_Outcomes_2018-134\\DATA\\Working\\ts.Model\\rds.files\\"
+gdir <- "Z:\\DEC\\Prescribed_Bushfire_Outcomes_2018-134\\DATA\\Working\\ts.Model\\plots.s2a\\graphs\\"
+vdir <- "Z:\\DEC\\Prescribed_Bushfire_Outcomes_2018-134\\DATA\\Working\\ts.Model\\"
+
+#df <- readRDS(paste0(fdir, "site.var.s2.2021-05-14"))
+df$OzCBI <- as.numeric(df$OzCBI)
+
+df.rm <- read.csv(paste0(vdir, "data-record\\outliers.csv"))
+df.rm <- mutate(df.rm, id = paste0(BURNID, "-", site))
+remove <- df.rm$id
+
+df <- filter(df, (id %in% remove) == FALSE)
+
+df <- mutate(df, Severity_class = case_when(OzCBI == 0 ~ "UB", 
+                                            OzCBI <= 0.9 ~ "NS", 
+                                            OzCBI <= 1.6 ~ "PS", 
+                                            OzCBI <= 2.1 ~ "CS",
+                                            TRUE ~ "CB")) 
+df$Severity_class <- factor(df$Severity_class, levels = c("UB", "NS", "PS", "CS", "CB"))
+
+fire.dates.df <- readRDS(paste0(fdir, "site.date.s2.2021-05-14")) %>% na.omit()
+#fire.dates.df <- fire.dates.df %>% dplyr::select(BURNID, ibra) %>% distinct() 
+
+select.index <- function(x){
+      dplyr::select(x, -id, BURNID,  -Veg.Type, OzCBI,
+                         -posti35max, -postNDVImin, -postNIRmin, -postNBRmin, -postNDWImin, 
+                         #preNIR, prei35, preNDVI, preNBR, preNDWI,
+                         di35max,  dNIRmax, dNBRmax, dNDVImax, dNDWImax, RBRmax)
+                         #LD1, LD2, -rain)
+}
+
+```
+
+
+
+
+
+**Field and imagery data**
+
+OzCBI scores (n = `r nrow(df)`) using the XXXX method were collected across `r nrow(fire.dates.df)` fires in the south west of Western Australia. The fires and subsequent fieldwork occurred between `r min(fire.dates.df$start)` and `r max(fire.dates.df$start)`. 
+
+The data was checked and outliers were identified and removed from the analysis.
+
+For each fire in the analysis Landsat satellite imagery was acquired spanning the start and end burn dates. Imagery was checked for cloud and only those where the fire area was cloud free were retained.
+
+**Create variables**
+
+From the Landsat time series and fire start and end dates a range of variables can be created. In this version the following variables have been used.
+
+* preNBR - nbr value of the image prior to the burn date;
+* preNDVI - ndvi value of the image prior to the burn date;
+* preB4 - Band 4 value of the image prior to the burn date:
+* prei35 - the i35 index value of the image prior to the burn date;
+* preNDWI - the ndwi index value of the image prior to the burn date;
+* dNBRmax - the maximum difference between the pre burn nbr and all nbr values until the fire end;
+* dNDVImax - the maximum difference between the pre burn ndvi and all ndvi values until the fire end;
+* dB4max - the maximum difference between the pre burn B4 and all B4 values until the fire end;
+* di35max - the maximum difference between the pre burn i35 and all i35 values until the fire end;
+* dNDWImax - the maximum difference between the pre burn ndwi and all ndwi values until the fire end; and
+* RBRmax - relativised burn ratio using the maximum difference between the pre burn nbr and all nbr values until the fire end.
+
+others can be added
+
+
+Regression of RBRmax with OzCBI is shown below. Plots such as this give an indication of the potential prediction of OzCBI values for each fire and assists to identify potential outliers. 
+
+```{r graph Sentinel, echo=FALSE,  warning=FALSE, fig.width=6, fig.height=8}
+
+ggplot(df, aes(OzCBI, dNBRmax))+
+  geom_point()+
+  facet_wrap(BURNID~., ncol = 4) + 
+  theme_bw()
+
+```
+
+
+```{r scatter by ibra, echo=FALSE,  warning=FALSE, fig.width=8, fig.height=6}
+ dfi <- df %>% na.omit() %>%
+    left_join(fire.dates.df, by = "BURNID") 
+
+dfi <- filter(dfi, (BURNID %in% c("ALB040", "PHS128")) == FALSE)
+
+ggplot(dfi, aes(OzCBI, RBRmax))+
+  geom_point(alpha = 0.4)+
+  stat_smooth(method = lm, se = FALSE)+
+  stat_smooth(method = lm, formula= (y ~ exp(x)), se = FALSE, linetype = 1, colour = "forestgreen")+
+  facet_wrap(ibra~., ncol = 3) + 
+  theme_bw()
+
+#ggsave(paste0(gdir, "field.pt.distribution.jpg"))
+
+```
+
+
+```{r graph pt distribution, echo=FALSE,  warning=FALSE, fig.width=8, fig.height=6}
+ dfi <- df %>% na.omit() %>%
+    left_join(fire.dates.df, by = "BURNID") 
+
+dfg <- dfi %>% group_by(ibra, Severity_class) %>%
+  summarise(n = n())
+
+ggplot(dfg, aes(Severity_class, n))+
+  geom_col()+
+  facet_wrap(ibra~., ncol = 4) + 
+  theme_bw()
+
+ggsave(paste0(gdir, "field.pt.distribution.jpg"))
+
+```
+
+
+Field points from the above fires were classified in terms of fire severity and grouped by ibra region.
+
+The fire severity groups are:
+
+* Unburnt (UB)
+*	No Scorch (NS)
+*	Partial Scorch (PS)
+*	Crown Scorch (CS)
+*	Crown Burnt (CB)
+
+A canonical variate analysis was carried out with the variables previously mentioned to produce two new variables (LD1 and LD2) that maximally separates the fire severity classes  (https://bio723-class.github.io/Bio723-book/canonical-variates-analysis.html). The plots show how the classes can be separated by these new variables. The best example is "Woodland (10-30m tall)", in this plot the fire severity classes are spread across the LD1 and LD2 axis.
+
+Prediction accuracy of burn severity class within ibra regions, using Sentinel bands. 
+
+```{r mod by veg type, echo=FALSE,  warning=FALSE, message=FALSE, fig.height=6, fig.width=8}
+
+  dfi <- df %>% na.omit() %>%
+    left_join(fire.dates.df, by = "BURNID") 
+
+  ggplot(dfi, aes(Severity_class, RBRmax))+ #, color = BURNID))+
+    geom_boxplot() + 
+    facet_wrap(.~ibra, ncol = 4)+
+    theme_bw()
+
+```
+
+
+```{r mod by veg type sjf, echo=FALSE,  warning=FALSE, message=FALSE}
+recalc.models <- T
+if (recalc.models == T){ 
+library(doParallel)
+  
+    dfi <- df %>% na.omit() %>%
+    left_join(fire.dates.df, by = "BURNID") %>%
+    mutate(Veg.Type = ibra) %>%
+      dplyr::select(-ibra, -start, -end)
+  
+  #types <- unique(dfi$Veg.Type)
+  types <- c("Southern Jarrah Forest", "Warren", "Northern Jarrah Forest", "Perth", "Dandaragan Plateau") 
+  labs <- c("sjf", "war", "njf", "pth", "dgn")
+  ck.all <- data.frame()  
+
+t <- 5
+#Define how many cores (memory is limiting factor here)
+UseCores <- length(types)
+#Register CoreCluster
+cl <- makeCluster(UseCores)
+registerDoParallel(cl)
+i <- 1
+foreach(t= 1:length(types)) %dopar% {
+library(tidyverse)
+library(caret)
+library(broom)
+library(kableExtra)
+library(lubridate)
+library(sf)
+library(raster)
+library(rpart)
+library(rpart.plot)
+#for(t in 1:length(types)){
+
+  df.i <- filter(dfi, Veg.Type == types[t])
+  df.i <- filter(df.i, (BURNID %in% c("ALB040", "PHS128")) == FALSE)
+  
+       ggplot(df.i, aes(Severity_class, dNBRmax, color = BURNID))+
+    geom_boxplot() + 
+    theme_bw()
+  ggsave(paste0(gdir, "boxplot\\boxplt_",labs[t] ,".jpg" ), width = 7, height = 4)
+  
+  ggplot(df.i, aes(OzCBI, dNBRmax, colour = BURNID))+
+  geom_point() +
+  stat_smooth(method = lm, se = FALSE)+
+    theme_bw()
+  ggsave(paste0(gdir, "scatter\\boxplt_",labs[t] ,".jpg" ), width = 7, height = 4)
+  
+  
+    df.rf <- select.index(df.i)
+    df.rf$Severity_class <- factor(df.rf$Severity_class, levels = c("UB", "NS", "PS", "CS", "CB"))
+
+     burns <- unique(df.rf$BURNID)   
+ 
+acc <- data.frame(BURNID = as.character(), rmse = as.numeric(), n = as.numeric(),
+                  nSamples = as.numeric(), rf.acc = as.numeric(),  rp.acc = as.numeric(),
+                   stringsAsFactors = FALSE)[1:length(burns), ]
+
+cm.df.all <- data.frame()
+j <- 1 
+
+for (j in 1:length(burns)){
+  burn.i <- burns[-j]
+  ck <- filter(df.i, BURNID == burns[j])
+  df.f <- filter(df.rf, BURNID %in% burn.i)
+  df.j <- dplyr::select(df.f, -BURNID, -OzCBI)
+  
+  ### random forest model with all variables
+  df.j <- droplevels(df.j)
+    rf_model <- train(Severity_class ~.,
+      data = df.j, 
+      #tuneGrid = tunegrid,
+      method = "rf", # random forest model from the ranger package
+      importance = TRUE,
+      trControl = trainControl(method = "repeatedcv", 
+                           number = 10, # number of folds in the training data
+                           repeats = 5, 
+                           verboseIter = FALSE)) # do not print progress updates
+  
+
+  df.w <- filter(df.rf, (BURNID %in% burn.i)==FALSE )
+  df.w$predict <- predict(rf_model, df.w)
+
+  ck <- ck %>% dplyr::select(id, Veg.Type) %>% bind_cols(df.w)
+  ck.all <- bind_rows(ck, ck.all)
+  
+  cm <- confusionMatrix(df.w$predict, df.w$Severity_class)
+
+  ggplot(as.data.frame(cm$table), aes(Prediction,sort(Reference,decreasing = T), fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(title = paste0(types[t], ": ", df.w$BURNID[1], 
+                            ", acc = ", round(cm$overall[1], digits = 3)), y = "Reference",x = "Prediction") +
+        scale_x_discrete(labels=c("unburnt","no scorch","partial scorch","canopy scorch", "canopy burnt")) +
+        scale_y_discrete(labels=c("canopy burnt", "canopy scorch","partial scorch","no scorch", "unburnt"))
+  ggsave(paste0(gdir, "cm\\ibra\\cm_", labs[t], "_",df.w$BURNID[1], "_rf.jpg" ), width = 7, height = 4)
+  
+  cm.rf <- as.data.frame(cm$table)
+  cm.rf$acc <- cm$overall[1]
+  cm.rf$model <- "rf"
+  
+  ### rpart model with single index
+  df.rp <- dplyr::select(df.j, Severity_class, RBRmax)
+  rp.model <- rpart(Severity_class ~., data = df.rp, method="class")  
+  #rpart.plot(rp.model) 
+  df.w$predict <- predict(rp.model, df.w, type = "class")
+  cm <- confusionMatrix(df.w$predict, df.w$Severity_class)
+  cm.rp <- as.data.frame(cm$table)
+  cm.rp$acc <- cm$overall[1]
+  cm.rp$model <- "rpart"
+  
+  ### linear model
+  df.ln <- dplyr::select(df.f, OzCBI, RBRmax)
+  exp(coef(lm()))
+  
+ library(drc)
+library(nlme)
+library(aomisc)
+  model <- drm(OzCBI~. , fct = DRC.powerCurve(), data = df.ln)
+
+ 
+  ln.model <- lm(OzCBI ~ exp(RBRmax), data = df.ln)
+  ln.model <- nls(OzCBI ~ a*exp(r*RBRmax), data = df.ln)
+ 
+  summary(ln.model)
+  
+  
+  ggplot(df.ln, aes(y = OzCBI, x = RBRmax))+
+  geom_point(alpha = 0.4)+
+  stat_smooth(method = lm, formula= (y ~ exp(x)), se = TRUE, linetype = 1, colour = "forestgreen")+
+  theme_bw()
+
+  df.ln$predict <- 0.34 * exp(df.ln$RBRmax * 4.3)
+
+  plot(df.ln$predict, df.ln$OzCBI)
+    
+cm.df <- bind_rows(cm.rp, cm.rf)
+  
+  cm.df$burn <- df.w$BURNID[1]
+  cm.df$n <- nrow(df.w)
+  cm.df$ibra <- types[t]
+ cm.df.all <- bind_rows(cm.df.all, cm.df)
+}
+ck.all <- mutate(ck.all, dif = as.numeric(predict) - as.numeric(Severity_class))
+write.csv(ck.all, paste0(vdir, "plots.s2a\\predict\\predict_ibra_s2_", labs[t],".csv"))
+saveRDS(cm.df.all, paste0(fdir, "cm.type.s2.",labs[t],".", Sys.Date()))
+}
+stopCluster(cl)
+}
+```
+
+Classification accuracy in the southern jarrah forest is `r acc.g2$perc[1]`. With `r acc.g2$perc[1] + acc.g2$perc[2]` of points within one of correct class.
+
+```{r ibra acc sjf 2, echo=FALSE,  warning=FALSE, message=FALSE}
+
+ls.acc <- list.files(fdir,  version.date)
+ls.acc <- ls.acc[str_detect(ls.acc, "cm.type.s2.")]
+
+i <- 1
+acc.summary <- data.frame(ibra = as.character(), Accuracy = as.numeric(), 
+                          Acc.within.1 = as.numeric(), n = as.numeric(), model = as.character(),
+                          stringsAsFactors = FALSE)[1:(length(ls.acc)*2),] 
+r <- 1
+for (i in 1:length(ls.acc)){
+  acc.i <- readRDS(paste0(fdir, ls.acc[i]))
+  mods <- unique(acc.i$model)
+  
+  m <- 1
+  for(m in 1:2){
+    acc.m <- acc.i %>% filter(model == mods[m]) %>% 
+      mutate( dif = abs(as.numeric(Prediction) - as.numeric(Reference)))
+    acc.summary$n[r] <- sum(acc.m$Freq)
+    acc.1 <- filter(acc.m, dif <= 1)
+    acc.0 <- filter(acc.m, dif <= 0)
+    t <- sum(acc.1$Freq)/sum(acc.m$Freq)
+    t <- 
+     
+    acc.summary$Accuracy[r] <- (sum(acc.0$Freq)/sum(acc.m$Freq))*100
+    acc.summary$Acc.within.1[r] <- (sum(acc.1$Freq)/sum(acc.m$Freq))*100
+    acc.summary$ibra[r] <- acc.i$ibra[1]
+    acc.summary$model[r] <- mods[m]
+    r <- r+1
+  }
+}
+
+
+sum.rf <- acc.summary %>% filter( model == "rf") %>%
+  dplyr::select(-model, -n)
+colnames(sum.rf) <- c("ibra", "rf.acc", "rf.acc1")
+
+sum.rp <- acc.summary %>% filter( model == "rpart") %>%
+  dplyr::select(-model)
+colnames(sum.rp) <- c("ibra", "rp.acc", "rp.acc1", "n")
+
+acc.final <- left_join(sum.rf, sum.rp, by = "ibra")
+
+acc.final %>%
+  kable(digits=1, row.names = FALSE, caption = "Table 6. Overall classificaion accuracy") %>%
+  kable_styling()
+
+```
+
+```{r ibra acc wh 3 forest 10 to 30 m, echo=FALSE,  warning=FALSE, message=FALSE}
+acc <- readRDS(paste0(fdir, "cm.type.s2.sjf.", version.date)) %>%
+  dplyr::select(burn, acc, model,  n) %>%
+  distinct() %>%
+  spread(model, acc)
+
+#acc$acc <- round(acc$acc, digits = 3)
+```
+
+Percent accuracy for all fires in Southern Jarrah Forest ibra. The mean accuracy is `r round(mean(acc$acc), digits = 3)`, with a maximum of `r max(acc$acc)` and minimum of `r min(acc$acc)`.
+
+```{r ibra acc sjf 4 forest 10 to 30 m, echo=FALSE,  warning=FALSE, message=FALSE}
+acc %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 5. Accuracy % and number of sample points for fires within the Southern Jarrah Forest") %>%
+  kable_styling()
+
+```
+
+
+
+```{r mod by veg type withheld warren, echo=FALSE,  warning=FALSE, message=FALSE}
+#recalc.models <- T
+#make.graphs <- T
+if (recalc.models == T){ 
+  
+i <- 1
+ck.all <- data.frame()  
+
+  df.i <- filter(dfi, Veg.Type == types[2])
+   df.i <- filter(df.i, (BURNID %in% c("ALB040", "FRK035")) == FALSE)
+   
+     ggplot(df.i, aes(Severity_class, dNBRmax, color = BURNID))+
+    geom_boxplot() + 
+    theme_bw()
+  ggsave(paste0(gdir, "boxplot\\boxplt_wrn.jpg" ), width = 7, height = 4)
+  
+  if(nrow(df.i) > 15){
+   
+    df.rf <- select.index(df.i)
+    #df.rf$Severity_class <- factor(df.rf$Severity_class, levels = c("U", "NS", "PS", "CS", "CB"))
+
+    burns <- unique(df.rf$BURNID)   
+ 
+acc <- data.frame(BURNID = as.character(), rmse = as.numeric(), n = as.numeric(),
+                  nSamples = as.numeric(), acc = as.numeric(),
+                   stringsAsFactors = FALSE)[1:length(burns), ]
+
+cm.df.all <- data.frame()
+j <-1    
+for (j in 1:length(burns)){
+  burn.i <- burns[-j]
+  ck <- filter(df.i, BURNID == burns[j])
+  
+  df.j <- filter(df.rf, BURNID %in% burn.i)
+  df.j <- dplyr::select(df.j, -BURNID) %>%
+    droplevels()
+#unique(df.j$Severity_class)  
+ 
+    rf_model <- train(Severity_class ~.,
+      data = df.j, 
+      #tuneGrid = tunegrid,
+      method = "rf", # random forest model from the ranger package
+      importance = TRUE,
+      trControl = trainControl(method = "repeatedcv", 
+                           number = 10, # number of folds in the training data
+                           repeats = 5, 
+                           verboseIter = FALSE)) # do not print progress updates
+  
+
+  df.w <- filter(df.rf, (BURNID %in% burn.i)==FALSE )
+ 
+  df.w$predict <- predict(rf_model, df.w)
+  
+   df.w$Severity_class <- factor(df.w$Severity_class, levels = c("UB", "NS", "PS", "CS", "CB"))
+  df.w$predict <- factor(df.w$predict, levels = c("UB", "NS", "PS", "CS", "CB"))
+  
+    ck <- ck %>% dplyr::select(id, Veg.Type) %>%
+    bind_cols(df.w)
+  ck.all <- bind_rows(ck, ck.all)
+  
+  cm <- confusionMatrix(df.w$predict, df.w$Severity_class)
+if (make.graphs == T){  
+  ggplot(as.data.frame(cm$table), aes(Prediction,sort(Reference,decreasing = T), fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(title = paste0("Warren: ", df.w$BURNID[1], 
+                            ", acc = ", round(cm$overall[1], digits = 3)), y = "Reference",x = "Prediction") +
+        scale_x_discrete(labels=c("unburnt","no scorch","partial scorch","canopy scorch", "canopy burnt")) +
+        scale_y_discrete(labels=c("canopy burnt", "canopy scorch","partial scorch","no scorch", "unburnt"))
+  ggsave(paste0(gdir, "cm\\ibra\\cm_warren_",df.w$BURNID[1], ".jpg" ), width = 7, height = 4)
+}
+  
+  cm.df <- as.data.frame(cm$table)
+  cm.df$burn <- df.w$BURNID[1]
+  cm.df$n <- nrow(df.w)
+  cm.df$acc <- cm$overall[1]
+ cm.df.all <- bind_rows(cm.df.all, cm.df)
+}
+ck.all <- mutate(ck.all, dif = as.numeric(predict) - as.numeric(Severity_class))
+write.csv(ck.all, paste0(vdir, "plots.s2a\\predict\\predict_ibra_s2_wrn.csv"))
+saveRDS(cm.df.all, paste0(fdir, "cm.ibra.s2.wrn.", Sys.Date()))
+}
+}
+```
+
+
+
+```{r ibra acc wh warren, echo=FALSE,  warning=FALSE, message=FALSE}
+acc <- readRDS(paste0(fdir, "cm.ibra.s2.wrn.", version.date))
+
+n.burns <- length(unique(acc$burn))
+
+acc.g <- acc %>% group_by(Reference, Prediction) %>%
+  summarise(n= sum(Freq))
+
+acc.g2 <- acc.g %>% mutate(dif = abs(as.numeric(Reference) - 
+                                       as.numeric(Prediction))) %>% 
+  group_by(dif) %>% 
+  summarise(n = sum(n))
+
+acc.g2 <- mutate(acc.g2, perc = (n/sum(acc.g2$n))*100, ibra = "warren")
+
+acc.all <- bind_rows(acc.g2, acc.all)
+
+acc.s <- spread(acc.g, Prediction,  n)
+
+acc.d <- acc.g %>% group_by(Reference) %>%
+  summarise(n= sum(n))
+ggplot(acc.d, aes(Reference, n)) +
+  labs(title = "Field data distribution in Warren")+
+  geom_col() +
+  theme_bw()
+
+```
+
+```{r ibra acc wh 2 Tall forest or Tall woodland, echo=FALSE,  warning=FALSE, message=FALSE}
+acc.s %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 4. Error matrix for fires within the Warren Ibra") %>%
+  kable_styling()
+
+
+```
+
+
+Northern Jarrah Forest
+
+
+```{r mod by veg type withheld Northern Jarrah Forest, echo=FALSE,  warning=FALSE, message=FALSE}
+#recalc.models <- T
+#make.graphs <- T
+
+
+if (recalc.models == T){ 
+
+
+ck.all <- data.frame()  
+i <- 1
+
+  df.i <- filter(dfi, Veg.Type == "Northern Jarrah Forest")
+  
+  #ub1 <- filter(df.i, Severity_class ==  "UB")
+  #ub2 <-   filter(ub1, str_detect(ub1$id, "ub"))
+  
+  #df.i <- filter(df.i,Severity_class !=  "UB")
+  #df.i <- bind_rows(df.i, ub2)
+
+  ggplot(df.i, aes(Severity_class, RBRmax, color = BURNID))+
+    geom_boxplot() + 
+    theme_bw()
+  ggsave(paste0(gdir, "boxplot\\boxplt_njf.jpg" ), width = 7, height = 4)
+  
+  
+   df.i <- filter(df.i, (BURNID %in% c("ALB040", "PHS128")) == FALSE)
+  if(nrow(df.i) > 15){
+
+
+    df.rf <- select.index(df.i)
+
+    
+     df.rf$Severity_class <- factor(df.rf$Severity_class, levels = c("UB", "NS", "PS", "CS", "CB"))
+#unique(df.rf$Severity_class)
+     
+     
+     burns <- unique(df.rf$BURNID)   
+ 
+acc <- data.frame(BURNID = as.character(), rmse = as.numeric(), n = as.numeric(),
+                  nSamples = as.numeric(), acc = as.numeric(),
+                   stringsAsFactors = FALSE)[1:length(burns), ]
+
+cm.df.all <- data.frame()
+j <-1    
+for (j in 1:length(burns)){
+  burn.i <- burns[-j]
+  ck <- filter(df.i, BURNID == burns[j])
+  
+  df.j <- filter(df.rf, BURNID %in% burn.i)
+  df.j <- dplyr::select(df.j, -BURNID) %>%
+    droplevels()
+#unique(df.j$Severity_class)  
+ 
+    rf_model <- train(Severity_class ~.,
+      data = df.j, 
+      #tuneGrid = tunegrid,
+      method = "rf", # random forest model from the ranger package
+      importance = TRUE,
+      trControl = trainControl(method = "repeatedcv", 
+                           number = 10, # number of folds in the training data
+                           repeats = 5, 
+                           verboseIter = FALSE)) # do not print progress updates
+  
+
+  df.w <- filter(df.rf, (BURNID %in% burn.i)==FALSE )
+ 
+  df.w$predict <- predict(rf_model, df.w)
+  
+   df.w$Severity_class <- factor(df.w$Severity_class, levels = c("UB", "NS", "PS", "CS", "CB"))
+  df.w$predict <- factor(df.w$predict, levels = c("UB", "NS", "PS", "CS", "CB"))
+  
+  ck <- ck %>% dplyr::select(id, Veg.Type) %>%
+    bind_cols(df.w)
+  ck.all <- bind_rows(ck, ck.all)
+  
+  cm <- confusionMatrix(df.w$predict, df.w$Severity_class)
+if (make.graphs == T){  
+  ggplot(as.data.frame(cm$table), aes(Prediction,sort(Reference,decreasing = T), fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(title = paste0("Northern Jarrah Forest: ", df.w$BURNID[1], 
+                            ", acc = ", round(cm$overall[1], digits = 3)), y = "Reference",x = "Prediction") +
+        scale_x_discrete(labels=c("unburnt","no scorch","partial scorch","canopy scorch", "canopy burnt")) +
+        scale_y_discrete(labels=c("canopy burnt", "canopy scorch","partial scorch","no scorch", "unburnt"))
+  ggsave(paste0(gdir, "cm\\ibra\\cm_njf_",df.w$BURNID[1], ".jpg" ), width = 7, height = 4)
+}
+  
+  cm.df <- as.data.frame(cm$table)
+  cm.df$burn <- df.w$BURNID[1]
+  cm.df$n <- nrow(df.w)
+  cm.df$acc <- cm$overall[1]
+ cm.df.all <- bind_rows(cm.df.all, cm.df)
+}
+
+ck.all <- mutate(ck.all, dif = as.numeric(predict) - as.numeric(Severity_class))
+write.csv(ck.all, paste0(vdir, "plots.s2a\\predict\\predict_ibra_s2_njf.csv"))
+saveRDS(cm.df.all, paste0(fdir, "cm.ibra.s2.njf.", Sys.Date()))
+}
+}
+```
+
+```{r ibra field data by fire acc njf, echo=FALSE,  warning=FALSE, message=FALSE}
+#version.date <- "2021-03-22"
+acc <- readRDS(paste0(fdir, "cm.ibra.s2.njf.", version.date))
+
+n.burns <- length(unique(acc$burn))
+
+acc.g <- acc %>% group_by(Reference, Prediction) %>%
+  summarise(n= sum(Freq))
+
+acc.g2 <- acc.g %>% mutate(dif = abs(as.numeric(Reference) - 
+                                       as.numeric(Prediction))) %>% 
+  group_by(dif) %>% 
+  summarise(n = sum(n))
+
+acc.g2 <- mutate(acc.g2, perc = (n/sum(acc.g2$n))*100, ibra = "njf")
+
+acc.all <- bind_rows(acc.g2, acc.all)
+acc.d <- acc.g %>% group_by(Reference) %>%
+  summarise(n= sum(n))
+
+ggplot(acc.d, aes(Reference, n)) +
+  labs(title = "Field data distribution in Northern Jarrah Forest")+
+  geom_col() +
+  geom_text(aes(label = n), data = acc.d, nudge_y = 6)+
+  theme_bw()
+```
+
+```{r ibra acc wh njf distribution, echo=FALSE,  warning=FALSE, message=FALSE}
+acc.s <- spread(acc.g, Prediction,  n)
+
+acc.s %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 4. Error matrix for fires within the Northern Jarrah Forest ibra") %>%
+  kable_styling()
+```
+
+
+```{r ibra acc wh 3 njf, echo=FALSE,  warning=FALSE, message=FALSE}
+acc <- readRDS(paste0(fdir, "cm.ibra.s2.njf.", version.date)) %>%
+  dplyr::select(burn, acc, n) %>%
+  distinct()
+
+acc$acc <- round(acc$acc, digits = 3)
+```
+
+Percent accuracy for all fires in Northern Jarrah Forest ibra region. The mean accuracy is `r round(mean(acc$acc), digits = 3)`, with a maximum of `r max(acc$acc)` and minimum of `r min(acc$acc)`.
+
+```{r ibra acc wh 4 njf, echo=FALSE,  warning=FALSE, message=FALSE}
+acc %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 5. Accuracy % and number of sample points for fires within the NJF ibra region") %>%
+  kable_styling()
+
+```
+
+
+
+
+Perth
+
+
+```{r mod by veg type withheld perth, echo=FALSE,  warning=FALSE, message=FALSE}
+#recalc.models <- T
+#make.graphs <- T
+if (recalc.models == T){ 
+
+ 
+  types <- unique(dfi$Veg.Type)
+
+ck.all <- data.frame()  
+i <- 1
+
+  df.i <- filter(dfi, Veg.Type == "Perth")
+   df.i <- filter(df.i, (BURNID %in% c("ALB040", "PHS128")) == FALSE)
+   
+          ggplot(df.i, aes(Severity_class, dNBRmax, color = BURNID))+
+    geom_boxplot() + 
+    theme_bw()
+  ggsave(paste0(gdir, "boxplot\\boxplt_prt.jpg" ), width = 7, height = 4)
+  
+  if(nrow(df.i) > 15){
+    
+    df.rf <- select.index(df.i)
+
+    
+     df.rf$Severity_class <- factor(df.rf$Severity_class, levels = c("UB", "NS", "PS", "CS", "CB"))
+
+     burns <- unique(df.rf$BURNID)   
+ 
+acc <- data.frame(BURNID = as.character(), rmse = as.numeric(), n = as.numeric(),
+                  nSamples = as.numeric(), acc = as.numeric(),
+                   stringsAsFactors = FALSE)[1:length(burns), ]
+
+cm.df.all <- data.frame()
+j <-1    
+for (j in 1:length(burns)){
+  burn.i <- burns[-j]
+  ck <- filter(df.i, BURNID == burns[j])
+  
+  df.j <- filter(df.rf, BURNID %in% burn.i)
+  df.j <- dplyr::select(df.j, -BURNID) %>%
+    droplevels()
+#unique(df.j$Severity_class)  
+ 
+    rf_model <- train(Severity_class ~.,
+      data = df.j, 
+      #tuneGrid = tunegrid,
+      method = "rf", # random forest model from the ranger package
+      importance = TRUE,
+      trControl = trainControl(method = "repeatedcv", 
+                           number = 10, # number of folds in the training data
+                           repeats = 5, 
+                           verboseIter = FALSE)) # do not print progress updates
+  
+
+  df.w <- filter(df.rf, (BURNID %in% burn.i)==FALSE )
+ 
+  df.w$predict <- predict(rf_model, df.w)
+  
+   df.w$Severity_class <- factor(df.w$Severity_class, levels = c("UB", "NS", "PS", "CS", "CB"))
+  df.w$predict <- factor(df.w$predict, levels = c("UB", "NS", "PS", "CS", "CB"))
+  
+  ck <- ck %>% dplyr::select(id, Veg.Type) %>%
+    bind_cols(df.w)
+  ck.all <- bind_rows(ck, ck.all)
+  
+  cm <- confusionMatrix(df.w$predict, df.w$Severity_class)
+if (make.graphs == T){  
+  ggplot(as.data.frame(cm$table), aes(Prediction,sort(Reference,decreasing = T), fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(title = paste0("Perth: ", df.w$BURNID[1], 
+                            ", acc = ", round(cm$overall[1], digits = 3)), y = "Reference",x = "Prediction") +
+        scale_x_discrete(labels=c("unburnt","no scorch","partial scorch","canopy scorch", "canopy burnt")) +
+        scale_y_discrete(labels=c("canopy burnt", "canopy scorch","partial scorch","no scorch", "unburnt"))
+  ggsave(paste0(gdir, "cm\\ibra\\cm_pth_",df.w$BURNID[1], ".jpg" ), width = 7, height = 4)
+}
+  
+  cm.df <- as.data.frame(cm$table)
+  cm.df$burn <- df.w$BURNID[1]
+  cm.df$n <- nrow(df.w)
+  cm.df$acc <- cm$overall[1]
+ cm.df.all <- bind_rows(cm.df.all, cm.df)
+}
+
+ck.all <- mutate(ck.all, dif = as.numeric(predict) - as.numeric(Severity_class))
+write.csv(ck.all, paste0(vdir, "plots.s2a\\predict\\predict_ibra_s2_pth.csv"))
+saveRDS(cm.df.all, paste0(fdir, "cm.ibra.s2.pth.", Sys.Date()))
+}
+}
+```
+
+```{r ibra pt distribution perth, echo=FALSE,  warning=FALSE, message=FALSE}
+#version.date <- "2021-03-22"
+acc <- readRDS(paste0(fdir, "cm.ibra.s2.pth.", version.date))
+
+n.burns <- length(unique(acc$burn))
+
+acc.g <- acc %>% group_by(Reference, Prediction) %>%
+  summarise(n= sum(Freq))
+
+acc.g2 <- acc.g %>% mutate(dif = abs(as.numeric(Reference) - 
+                                       as.numeric(Prediction))) %>% 
+  group_by(dif) %>% 
+  summarise(n = sum(n))
+
+acc.g2 <- mutate(acc.g2, perc = (n/sum(acc.g2$n))*100, ibra = "perth")
+
+acc.all <- bind_rows(acc.g2, acc.all)
+
+acc.s <- spread(acc.g, Prediction,  n)
+
+
+acc.d <- acc.g %>% group_by(Reference) %>%
+  summarise(n= sum(n))
+ggplot(acc.d, aes(Reference, n)) +
+  labs(title = "Field data distribution in Perth")+
+  geom_col() +
+  geom_text(aes(label = n), data = acc.d, nudge_y = 6)+
+  theme_bw()
+```
+
+
+```{r ibra acc wh 2 Low woodland or open low woodland, echo=FALSE,  warning=FALSE, message=FALSE}
+acc.s %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 4. Error matrix for fires within the Perth ibra") %>%
+  kable_styling()
+
+```
+
+```{r ibra acc wh 3 perth, echo=FALSE,  warning=FALSE, message=FALSE}
+acc <- readRDS(paste0(fdir, "cm.ibra.s2.pth.", version.date)) %>%
+  dplyr::select(burn, acc, n) %>%
+  distinct()
+
+acc$acc <- round(acc$acc, digits = 3)
+```
+
+Percent accuracy for all fires in Perth ibra region. The mean accuracy is `r round(mean(acc$acc), digits = 3)`, with a maximum of `r max(acc$acc)` and minimum of `r min(acc$acc)`.
+
+```{r ibra acc wh 4 perth, echo=FALSE,  warning=FALSE, message=FALSE}
+acc %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 5. Accuracy % and number of sample points for fires within the Perth ibra region") %>%
+  kable_styling()
+
+```
+
+Dandaragan
+
+```{r mod by veg type withheld dgn, echo=FALSE,  warning=FALSE, message=FALSE}
+#recalc.models <- T
+#make.graphs <- T
+if (recalc.models == T){ 
+
+ 
+  types <- unique(dfi$Veg.Type)
+
+ck.all <- data.frame()  
+i <- 1
+
+  df.i <- filter(dfi, Veg.Type == "Dandaragan Plateau")
+   df.i <- filter(df.i, (BURNID %in% c("ALB040", "PHS128")) == FALSE)
+   
+  ggplot(df.i, aes(Severity_class, dNBRmax, color = BURNID))+
+    geom_boxplot() + 
+    theme_bw()
+  ggsave(paste0(gdir, "boxplot\\boxplt_dgn.jpg" ), width = 7, height = 4)
+  
+  if(nrow(df.i) > 15){
+    
+    df.rf <- select.index(df.i)
+
+    
+     df.rf$Severity_class <- factor(df.rf$Severity_class, levels = c("UB", "NS", "PS", "CS", "CB"))
+
+     burns <- unique(df.rf$BURNID)   
+ 
+acc <- data.frame(BURNID = as.character(), rmse = as.numeric(), n = as.numeric(),
+                  nSamples = as.numeric(), acc = as.numeric(),
+                   stringsAsFactors = FALSE)[1:length(burns), ]
+
+cm.df.all <- data.frame()
+j <-1    
+for (j in 1:length(burns)){
+  burn.i <- burns[-j]
+  ck <- filter(df.i, BURNID == burns[j])
+  
+  df.j <- filter(df.rf, BURNID %in% burn.i)
+  df.j <- dplyr::select(df.j, -BURNID) %>%
+    droplevels()
+#unique(df.j$Severity_class)  
+ 
+    rf_model <- train(Severity_class ~.,
+      data = df.j, 
+      #tuneGrid = tunegrid,
+      method = "rf", # random forest model from the ranger package
+      importance = TRUE,
+      trControl = trainControl(method = "repeatedcv", 
+                           number = 10, # number of folds in the training data
+                           repeats = 5, 
+                           verboseIter = FALSE)) # do not print progress updates
+  
+
+  df.w <- filter(df.rf, (BURNID %in% burn.i)==FALSE )
+ 
+  df.w$predict <- predict(rf_model, df.w)
+  
+   df.w$Severity_class <- factor(df.w$Severity_class, levels = c("UB", "NS", "PS", "CS", "CB"))
+  df.w$predict <- factor(df.w$predict, levels = c("UB", "NS", "PS", "CS", "CB"))
+  
+  ck <- ck %>% dplyr::select(id, Veg.Type) %>%
+    bind_cols(df.w)
+  ck.all <- bind_rows(ck, ck.all)
+  
+  cm <- confusionMatrix(df.w$predict, df.w$Severity_class)
+if (make.graphs == T){  
+  ggplot(as.data.frame(cm$table), aes(Prediction,sort(Reference,decreasing = T), fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(title = paste0("Dandaragan: ", df.w$BURNID[1], 
+                            ", acc = ", round(cm$overall[1], digits = 3)), y = "Reference",x = "Prediction") +
+        scale_x_discrete(labels=c("unburnt","no scorch","partial scorch","canopy scorch", "canopy burnt")) +
+        scale_y_discrete(labels=c("canopy burnt", "canopy scorch","partial scorch","no scorch", "unburnt"))
+  ggsave(paste0(gdir, "cm\\ibra\\cm_dgn_",df.w$BURNID[1], ".jpg" ), width = 7, height = 4)
+}
+  
+  cm.df <- as.data.frame(cm$table)
+  cm.df$burn <- df.w$BURNID[1]
+  cm.df$n <- nrow(df.w)
+  cm.df$acc <- cm$overall[1]
+ cm.df.all <- bind_rows(cm.df.all, cm.df)
+}
+
+ck.all <- mutate(ck.all, dif = as.numeric(predict) - as.numeric(Severity_class))
+write.csv(ck.all, paste0(vdir, "plots.s2a\\predict\\predict_ibra_s2_dgn.csv"))
+saveRDS(cm.df.all, paste0(fdir, "cm.ibra.s2.dgn.", Sys.Date()))
+}
+}
+```
+
+```{r ibra pt distribution Dandaragan, echo=FALSE,  warning=FALSE, message=FALSE}
+#version.date <- "2021-03-22"
+acc <- readRDS(paste0(fdir, "cm.ibra.s2.dgn.", version.date))
+
+n.burns <- length(unique(acc$burn))
+
+acc.g <- acc %>% group_by(Reference, Prediction) %>%
+  summarise(n= sum(Freq))
+
+acc.g2 <- acc.g %>% mutate(dif = abs(as.numeric(Reference) - 
+                                       as.numeric(Prediction))) %>% 
+  group_by(dif) %>% 
+  summarise(n = sum(n))
+
+acc.g2 <- mutate(acc.g2, perc = (n/sum(acc.g2$n))*100, ibra = "dandaragn")
+
+acc.all <- bind_rows(acc.g2, acc.all)
+
+acc.s <- spread(acc.g, Prediction,  n)
+
+
+acc.d <- acc.g %>% group_by(Reference) %>%
+  summarise(n= sum(n))
+ggplot(acc.d, aes(Reference, n)) +
+  labs(title = "Field data distribution in Dandaragan")+
+  geom_col() +
+  geom_text(aes(label = n), data = acc.d, nudge_y = 6)+
+  theme_bw()
+```
+
+
+```{r ibra acc wh 2 Dandaragan, echo=FALSE,  warning=FALSE, message=FALSE}
+acc.s %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 4. Error matrix for fires within the Dandaragan ibra") %>%
+  kable_styling()
+
+```
+
+```{r ibra acc wh 3 Dandaragan, echo=FALSE,  warning=FALSE, message=FALSE}
+acc <- readRDS(paste0(fdir, "cm.ibra.s2.dgn.", version.date)) %>%
+  dplyr::select(burn, acc, n) %>%
+  distinct()
+
+acc$acc <- round(acc$acc, digits = 3)
+```
+
+Percent accuracy for all fires in Dandaragan ibra region. The mean accuracy is `r round(mean(acc$acc), digits = 3)`, with a maximum of `r max(acc$acc)` and minimum of `r min(acc$acc)`.
+
+```{r ibra acc wh 4 Dandaragan, echo=FALSE,  warning=FALSE, message=FALSE}
+acc %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 5. Accuracy % and number of sample points for fires within the Dandaragan ibra region") %>%
+  kable_styling()
+
+```
+
+
+```{r accuracy summary, echo=FALSE,  warning=FALSE, message=FALSE}
+acc.ibras <- unique(acc.1$ibra)
+i <- 1
+acc.summary <- data.frame(ibra = as.character(), Accuracy = as.numeric(), 
+                          Acc.within.1 = as.numeric(), n = as.numeric(), stringsAsFactors = FALSE)[1:length(acc.ibras),] 
+for (i in 1:length(acc.ibras)){
+  acc.i <- filter(acc.all, ibra == acc.ibras[i])
+  acc.summary$n[i] <- sum(acc.i$n)
+  acc.i <- filter(acc.i, dif <= 1)
+  acc.summary$Accuracy[i] <- acc.i$perc[1]
+  acc.summary$Acc.within.1[i] <- acc.i$perc[1] + acc.i$perc[2]
+  acc.summary$ibra[i] <- acc.ibras[i]
+}
+
+acc.summary %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 6. Overall classificaion accuracy") %>%
+  kable_styling()
+
+```
+
+Version date: `r version.date`
