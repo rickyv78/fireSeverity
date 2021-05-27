@@ -23,7 +23,7 @@ library(here)
 options(scipen=999) # remove scientific notation
 
 # version of model files to load
-version.date <- "2021-05-26"
+version.date <- "2021-05-27"
 
 # location for graphs
 gdir <- "Z:\\DEC\\Prescribed_Bushfire_Outcomes_2018-134\\DATA\\Working\\ts.Model\\plots2yr\\graphs\\"
