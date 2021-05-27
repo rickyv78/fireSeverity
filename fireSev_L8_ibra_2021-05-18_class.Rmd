@@ -1,0 +1,297 @@
+---
+title: "OzCBI fire severity using Landsat satellite data"
+author: "Densmore. V, Fontaine. J and van Dongen. R"
+date: "26 May 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE,  warning=FALSE}
+#load libraries
+library(tidyverse)
+library(caret)
+library(broom)
+
+library(kableExtra)
+library(lubridate)
+library(sf)
+library(raster)
+library(rpart)
+library(rpart.plot)
+library(formattable)
+library(here)
+
+options(scipen=999) # remove scientific notation
+
+# version of model files to load
+version.date <- "2021-05-26"
+
+# location for graphs
+gdir <- "Z:\\DEC\\Prescribed_Bushfire_Outcomes_2018-134\\DATA\\Working\\ts.Model\\plots2yr\\graphs\\"
+
+# data file includes all field sites cbi scores and index values
+df <- readRDS(here("rds.files/site.var.L8.2021-05-26"))
+df$OzCBI <- as.numeric(df$OzCBI)
+
+df.rm <- read.csv(here("data-record\\outliers.csv"))
+df.rm <- mutate(df.rm, id = paste0(BURNID, "-", site))
+remove <- df.rm$id
+
+df <- filter(df, (id %in% remove) == FALSE)
+
+df <- mutate(df, Severity_class = case_when(OzCBI == 0 ~ "U", 
+                                            OzCBI <= 0.5 ~ "L", 
+                                            OzCBI <= 1.4 ~ "M", 
+                                            OzCBI <= 2.0 ~ "H",
+                                            TRUE ~ "VH")) 
+df$Severity_class <- factor(df$Severity_class, levels = c("U", "L", "M", "H", "VH"))
+
+fire.dates.df <- readRDS(here("rds.files/site.date.s2.2021-05-14")) %>% na.omit()
+
+dfi <- df %>% na.omit() %>%
+  left_join(fire.dates.df, by = "BURNID") %>%
+  mutate(Veg.Type = ibra) %>%
+  dplyr::select(-ibra, -start, -end)
+
+```
+
+**Field and imagery data**
+
+OzCBI scores (n = `r nrow(df)`) using the XXXX method were collected across `r nrow(fire.dates.df)` fires in the south west of Western Australia. The fires and subsequent fieldwork occurred between `r min(fire.dates.df$start)` and `r max(fire.dates.df$start)`. 
+
+The data was checked and outliers were identified and removed from the analysis.
+
+For each fire in the analysis Landsat satellite imagery was acquired spanning the start and end burn dates. Imagery was checked for cloud and only those where the fire area was cloud free were retained.
+
+**Create variables**
+
+From the Landsat time series and fire start and end dates a range of variables can be created. In this version the following variables have been used.
+
+* preNBR - nbr value of the image prior to the burn date;
+* preNDVI - ndvi value of the image prior to the burn date;
+* preB4 - Band 4 value of the image prior to the burn date:
+* prei35 - the i35 index value of the image prior to the burn date;
+* preNDWI - the ndwi index value of the image prior to the burn date;
+* dNBRmax - the maximum difference between the pre burn nbr and all nbr values until the fire end;
+* dNDVImax - the maximum difference between the pre burn ndvi and all ndvi values until the fire end;
+* dB4max - the maximum difference between the pre burn B4 and all B4 values until the fire end;
+* di35max - the maximum difference between the pre burn i35 and all i35 values until the fire end;
+* dNDWImax - the maximum difference between the pre burn ndwi and all ndwi values until the fire end; and
+* RBRmax - relativised burn ratio using the maximum difference between the pre burn nbr and all nbr values until the fire end.
+
+others can be added
+
+
+Regression of RBRmax with OzCBI is shown below. Plots such as this give an indication of the potential prediction of OzCBI values for each fire and assists to identify potential outliers. 
+
+```{r graph Sentinel, echo=FALSE,  warning=FALSE, fig.width=7, fig.height=9}
+
+ggplot(df, aes(dNBRmax, OzCBI))+
+  geom_point(alpha = 0.5)+
+   stat_smooth(method = lm, se = FALSE, formula = y ~ x + I(x^2), linetype = 2, colour = "red") +
+  facet_wrap(BURNID~., ncol = 4) + 
+  theme_bw()
+
+```
+
+
+```{r scatter by ibra, echo=FALSE,  warning=FALSE, fig.width=8, fig.height=6}
+ dfi <- df %>% na.omit() %>%
+    left_join(fire.dates.df, by = "BURNID") 
+
+dfi <- filter(dfi, (BURNID %in% c("ALB040", "PHS128")) == FALSE)
+
+ggplot(dfi, aes(dNBRmax, OzCBI))+
+  geom_point(alpha = 0.4)+
+  stat_smooth(method = lm, se = FALSE)+
+  #stat_smooth(method = lm, formula= (y~log(x)), se = FALSE, linetype = 1, colour = "forestgreen")+
+  stat_smooth(method = lm, formula = y ~ x + I(x^2), linetype = 2, colour = "red") +
+  facet_wrap(ibra~., ncol = 3) + 
+  theme_bw()
+
+ggsave(paste0(gdir, "scatter.by.ibra_L8.jpg"))
+
+```
+
+
+```{r graph pt distribution, echo=FALSE,  warning=FALSE, fig.width=8, fig.height=6}
+ dfi <- df %>% na.omit() %>%
+    left_join(fire.dates.df, by = "BURNID") 
+
+dfg <- dfi %>% group_by(ibra, Severity_class) %>%
+  summarise(n = n())
+
+ggplot(dfg, aes(Severity_class, n))+
+  geom_col()+
+  facet_wrap(ibra~., ncol = 4) + 
+  theme_bw()
+
+#ggsave(paste0(gdir, "field.pt.distribution.jpg"))
+
+```
+
+
+Field points from the above fires were classified in terms of fire severity and grouped by ibra region.
+
+The fire severity groups are:
+
+* Unburnt (UB)
+*	No Scorch (NS)
+*	Partial Scorch (PS)
+*	Crown Scorch (CS)
+*	Crown Burnt (CB)
+
+A canonical variate analysis was carried out with the variables previously mentioned to produce two new variables (LD1 and LD2) that maximally separates the fire severity classes  (https://bio723-class.github.io/Bio723-book/canonical-variates-analysis.html). The plots show how the classes can be separated by these new variables. The best example is "Woodland (10-30m tall)", in this plot the fire severity classes are spread across the LD1 and LD2 axis.
+
+Prediction accuracy of burn severity class within ibra regions, using Sentinel bands. 
+
+```{r mod by veg type, echo=FALSE,  warning=FALSE, message=FALSE, fig.height=6, fig.width=8}
+
+  dfi <- df %>% na.omit() %>%
+    left_join(fire.dates.df, by = "BURNID") 
+
+  ggplot(dfi, aes(Severity_class, RBRmax))+ #, color = BURNID))+
+    geom_boxplot() + 
+    facet_wrap(.~ibra, ncol = 4)+
+    theme_bw()
+
+```
+
+
+```{r ibra acc sjf 2, echo=FALSE,  warning=FALSE, message=FALSE}
+
+ls.acc <- list.files(here("rds.files"),  version.date)
+ls.acc <- ls.acc[str_detect(ls.acc, "cm.type.L8.")]
+
+  acc.i <- readRDS(paste0(here("rds.files"), "/", ls.acc[1]))
+  mods <- unique(acc.i$model)
+
+i <- 1
+acc.summary <- data.frame(ibra = as.character(), Accuracy = as.numeric(), 
+                          Acc.within.1 = as.numeric(), n = as.numeric(), model = as.character(),
+                          stringsAsFactors = FALSE)[1:(length(ls.acc)*length(mods)),] 
+r <- 1
+for (i in 1:length(ls.acc)){
+  acc.i <- readRDS(paste0(here("rds.files"), "/", ls.acc[i]))
+  mods <- unique(acc.i$model)
+  
+  m <- 1
+  for(m in 1:length(mods)){
+    acc.m <- acc.i %>% filter(model == mods[m]) %>% 
+      mutate( dif = abs(as.numeric(Prediction) - as.numeric(Reference)))
+    acc.summary$n[r] <- sum(acc.m$Freq)
+    acc.1 <- filter(acc.m, dif <= 1)
+    acc.0 <- filter(acc.m, dif <= 0)
+    t <- sum(acc.1$Freq)/sum(acc.m$Freq)
+    t <- 
+     
+    acc.summary$Accuracy[r] <- (sum(acc.0$Freq)/sum(acc.m$Freq))*100
+    acc.summary$Acc.within.1[r] <- (sum(acc.1$Freq)/sum(acc.m$Freq))*100
+    acc.summary$ibra[r] <- acc.i$ibra[1]
+    acc.summary$model[r] <- mods[m]
+    r <- r+1
+  }
+}
+
+acc.final <- acc.summary %>% dplyr::select(-Acc.within.1, -n) %>%
+  spread(model, Accuracy) %>% 
+  dplyr::select(ibra, rf, rw, rpart, quadratic)
+#c<- 1
+#for(c in 1:nrow(acc.final)){
+#  acc.final[c,2:4] = color_tile("white", "orange")(acc.final[c,2:4])
+#  #vip.s[,c] = cell_spec(vip.s[,c], color = ifelse(vip.s[,c] > 50, "red", "black"))
+#}
+
+acc.final %>%
+  kable(col.names = c("Ibra", "Random Forest", "Weighted", "Decision tree (dNBR)", "Quadratic (dNBR)"),  digits=1, row.names = FALSE, caption = "Table 6. Overall classificaion accuracy from cross-validation", escape = F) %>%
+  kable_styling()
+
+```
+
+```{r ibra acc within 1, echo=FALSE,  warning=FALSE, message=FALSE}
+
+acc.final <- acc.summary %>% dplyr::select(-Accuracy, -n) %>%
+  spread(model, Acc.within.1) %>% 
+  dplyr::select(ibra, rf, rw, rpart, quadratic)
+
+acc.final %>%
+  kable(col.names = c("Ibra",  "Random Forest", "Weighted", "Decision tree (dNBR)", "Quadratic (dNBR)"), digits=1, row.names = FALSE, caption = "Table 6. Overall classificaion accuracy within one class from cross-validation") %>%
+  kable_styling()
+
+```
+
+Southern Jarrah Forest
+
+```{r ibra acc sjf 4 forest 10 to 30 m, echo=FALSE,  warning=FALSE, message=FALSE}
+acc <- readRDS(paste0(here("rds.files"), "/cm.type.L8.sjf.", version.date)) %>% 
+  filter(model == "rf")
+
+acc.s <- acc %>% group_by(Reference, Prediction) %>%
+  summarise(n= sum(Freq)) %>% spread(Prediction,  n)
+
+acc.s %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 5. Error matrix for fires within the Southern Jarrah Forest") %>%
+  kable_styling()
+
+```
+
+Warren
+
+```{r ibra acc wh warren, echo=FALSE,  warning=FALSE, message=FALSE}
+acc <- readRDS(paste0(here("rds.files"), "/cm.type.L8.war.", version.date)) %>% 
+  filter(model == "rf")
+
+acc.s <- acc %>% group_by(Reference, Prediction) %>%
+  summarise(n= sum(Freq)) %>% spread(Prediction,  n)
+
+acc.s %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 4. Error matrix for fires within the Warren Ibra") %>%
+  kable_styling()
+
+```
+
+Northern Jarrah Forest
+
+```{r ibra acc wh njf, echo=FALSE,  warning=FALSE, message=FALSE}
+acc <- readRDS(paste0(here("rds.files"), "/cm.type.L8.njf.", version.date)) %>% 
+  filter(model == "rf")
+
+acc.s <- acc %>% group_by(Reference, Prediction) %>%
+  summarise(n= sum(Freq)) %>% spread(Prediction,  n)
+
+acc.s %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 4. Error matrix for fires within the Northern Jarrah Forest Ibra") %>%
+  kable_styling()
+
+```
+
+Perth
+
+```{r ibra perth, echo=FALSE,  warning=FALSE, message=FALSE}
+#version.date <- "2021-03-22"
+acc <- readRDS(paste0(here("rds.files"), "/cm.type.L8.pth.", version.date))%>% 
+  filter(model == "rf")
+
+acc.s <- acc %>% group_by(Reference, Prediction) %>%
+  summarise(n= sum(Freq)) %>% spread(Prediction,  n)
+
+acc.s %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 4. Error matrix for fires within the Perth Ibra") %>%
+  kable_styling()
+
+```
+
+Dandaragan
+
+```{r ibra Dandaragan, echo=FALSE,  warning=FALSE, message=FALSE}
+acc <- readRDS(paste0(here("rds.files"), "/cm.type.L8.dgn.", version.date))%>% 
+  filter(model == "rf")
+
+acc.s <- acc %>% group_by(Reference, Prediction) %>%
+  summarise(n= sum(Freq)) %>% spread(Prediction,  n)
+
+acc.s %>%
+  kable(digits=3, row.names = FALSE, caption = "Table 4. Error matrix for fires within the Dandaragan Ibra") %>%
+  kable_styling()
+
+```
+Version date: `r version.date`
