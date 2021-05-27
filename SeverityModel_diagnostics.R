@@ -34,14 +34,12 @@ df <- mutate(df, Severity_class = case_when(OzCBI == 0 ~ "U",
 df$Severity_class <- factor(df$Severity_class, levels = c("U", "L", "M", "H", "VH"))
 
 fire.dates.df <- readRDS(here("rds.files/site.date.s2.2021-05-24")) %>% na.omit()
-#fire.dates.df <- fire.dates.df %>% dplyr::select(BURNID, ibra) %>% distinct() 
 
 select.index <- function(x){
   dplyr::select(x, -id, BURNID,  -Veg.Type, OzCBI,
                 -posti35max, -postNDVImin, -postNIRmin, -postNBRmin, -postNDWImin, 
-                #preNIR, prei35, preNDVI, preNBR, preNDWI,
+                -preNIR, -prei35, -preNDVI, -preNBR, -preNDWI,
                 di35max,  dNIRmax, dNBRmax, dNDVImax, dNDWImax, RBRmax)
-  #LD1, LD2, -rain)
 }
 
 dfi <- df %>% na.omit() %>%
