@@ -11,12 +11,18 @@ library(doParallel)
 library(here)
 
 options(scipen=999) # remove scientific notation
-sat <- "L8" #"s2a
+sat <- "s2a" #"L8" #"s2a
+
+t1 <- 0.5
+t2 <- 1.4
+t3 <- 2
+t4 <- 2.5
+
 # location for graphs
 #gdir <- "Z:\\DEC\\Prescribed_Bushfire_Outcomes_2018-134\\DATA\\Working\\ts.Model\\plots.s2a\\graphs\\"
 gdir <- "Z:\\DEC\\Prescribed_Bushfire_Outcomes_2018-134\\DATA\\Working\\ts.Model\\plots2yr\\graphs\\"
 
-df <- readRDS(here("rds.files/site.var.L8.2021-05-26"))
+df <- readRDS(here("rds.files/site.var.s2.2021-05-26"))
 
 df$OzCBI <- as.numeric(df$OzCBI)
 df.rm <- read.csv(here("data-record\\outliers.csv"))
@@ -25,10 +31,10 @@ remove <- df.rm$id
 
 df <- filter(df, (id %in% remove) == FALSE)
 
-df <- mutate(df, Severity_class = case_when(OzCBI == 0 ~ "U", 
-                                            OzCBI <= 0.5 ~ "L", 
-                                            OzCBI <= 1.4 ~ "M", 
-                                            OzCBI <= 2.0 ~ "H",
+df <- mutate(df, Severity_class = case_when(OzCBI <= t1 ~ "U", 
+                                            OzCBI <= t2 ~ "L", 
+                                            OzCBI <= t3 ~ "M",
+                                            OzCBI <= t4 ~ "H",
                                             TRUE ~ "VH")) 
 df$Severity_class <- factor(df$Severity_class, levels = c("U", "L", "M", "H", "VH"))
 

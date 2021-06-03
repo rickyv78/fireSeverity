@@ -23,7 +23,7 @@ library(here)
 options(scipen=999) # remove scientific notation
 
 # version of model files to load
-version.date <- "2021-05-27"
+version.date <- "2021-06-01"
 
 # location for graphs
 gdir <- "Z:\\DEC\\Prescribed_Bushfire_Outcomes_2018-134\\DATA\\Working\\ts.Model\\plots2yr\\graphs\\"
@@ -37,12 +37,17 @@ df.rm <- mutate(df.rm, id = paste0(BURNID, "-", site))
 remove <- df.rm$id
 
 df <- filter(df, (id %in% remove) == FALSE)
+```
 
-df <- mutate(df, Severity_class = case_when(OzCBI == 0 ~ "U", 
-                                            OzCBI <= 0.5 ~ "L", 
-                                            OzCBI <= 1.4 ~ "M", 
-                                            OzCBI <= 2.0 ~ "H",
+```{r setup2}
+df <- mutate(df, Severity_class = case_when(OzCBI <= 0.5 ~ "U", 
+                                            OzCBI <= 1.4 ~ "L", 
+                                            OzCBI <= 2.0 ~ "M",
+                                            OzCBI <= 2.5 ~ "H",
                                             TRUE ~ "VH")) 
+```
+
+```{r setup3, include=FALSE, echo=FALSE,  warning=FALSE}
 df$Severity_class <- factor(df$Severity_class, levels = c("U", "L", "M", "H", "VH"))
 
 fire.dates.df <- readRDS(here("rds.files/site.date.s2.2021-05-14")) %>% na.omit()
@@ -85,7 +90,7 @@ Regression of RBRmax with OzCBI is shown below. Plots such as this give an indic
 
 ```{r graph Sentinel, echo=FALSE,  warning=FALSE, fig.width=7, fig.height=9}
 
-ggplot(df, aes(dNBRmax, OzCBI))+
+ggplot(df, aes(RBRmax, OzCBI))+
   geom_point(alpha = 0.5)+
    stat_smooth(method = lm, se = FALSE, formula = y ~ x + I(x^2), linetype = 2, colour = "red") +
   facet_wrap(BURNID~., ncol = 4) + 

@@ -12,6 +12,13 @@ library(here)
 
 options(scipen=999) # remove scientific notation
 
+
+t1 <- 0.5
+t2 <- 1.4
+t3 <- 2
+t4 <- 2.5
+
+
 sat <- "L8" #"s2a
 df <- readRDS(here("rds.files/site.var.L8.2021-05-26"))
 #df <- readRDS(here("rds.files/site.var.s2.2021-05-26"))
@@ -26,10 +33,10 @@ remove <- df.rm$id
 
 df <- filter(df, (id %in% remove) == FALSE)
 
-df <- mutate(df, Severity_class = case_when(OzCBI == 0 ~ "U", 
-                                            OzCBI <= 0.5 ~ "L", 
-                                            OzCBI <= 1.4 ~ "M", 
-                                            OzCBI <= 2.0 ~ "H",
+df <- mutate(df, Severity_class = case_when(OzCBI <= t1 ~ "U", 
+                                            OzCBI <= t2 ~ "L", 
+                                            OzCBI <= t3 ~ "M",
+                                            OzCBI <= t4 ~ "H",
                                             TRUE ~ "VH")) 
 df$Severity_class <- factor(df$Severity_class, levels = c("U", "L", "M", "H", "VH"))
 
@@ -74,25 +81,15 @@ foreach(t= 1:length(types)) %dopar% {
   library(DMwR2) # for smote implementation
   library(purrr) # for functional programming (map)
   library(pROC) # for AUC calculations
-  library(MLmetrics)
+  #library(MLmetrics)
+  #install.packages("zoib")
+  #library(rjags)
+  #library(zoib)
   
 # for(t in 1:length(types)){
   
   df.i <- filter(dfi, Veg.Type == types[t])
   df.i <- filter(df.i, (BURNID %in% c("ALB040", "PHS128")) == FALSE)
-  
-  ggplot(df.i, aes(Severity_class, dNBRmax, color = BURNID))+
-    geom_boxplot() + 
-    theme_bw()
-  dir.create(paste0(gdir, "boxplot"), showWarnings = FALSE)
-  ggsave(paste0(gdir, "boxplot\\boxplt_",labs[t] ,"_" ,sat,".jpg" ), width = 7, height = 4)
-  
-  ggplot(df.i, aes(dNBRmax, OzCBI, colour = BURNID))+
-    geom_point() +
-    stat_smooth(method = lm, se = FALSE, formula = y ~ x + I(x^2), linetype = 2, colour = "red") +
-    theme_bw()
-  dir.create(paste0(gdir, "scatter"), showWarnings = FALSE)
-  ggsave(paste0(gdir, "scatter\\boxplt_",labs[t] ,"_" ,sat, ".jpg" ), width = 7, height = 4)
   
   df.rf <- select.index(df.i)
   df.rf$Severity_class <- factor(df.rf$Severity_class, levels = c("U", "L", "M", "H", "VH"))
@@ -149,14 +146,14 @@ foreach(t= 1:length(types)) %dopar% {
     
     ### weighted rf model
     ctrl <- trainControl(method = "repeatedcv",
-                         number = 10,
+                         number = 5,
                          repeats = 5,
                          summaryFunction = multiClassSummary,
                          classProbs = TRUE)
     
     # Create model weights (they sum to one)
     # model with up sampling
-    w.model = "rf" #"gbm"
+    w.model = "rf"# #gbm"
     if (types[t] == "Dandaragan Plateau"){w.model = "rf"}
     ctrl$sampling <- "up"
     up_fit <- train(Severity_class ~ .,
@@ -184,17 +181,25 @@ foreach(t= 1:length(types)) %dopar% {
     cm.rp$acc <- cm$overall[1]
     cm.rp$model <- "rpart"
     
+    ### beta regression
+    #df.bt <- dplyr::select(df.f, OzCBI, RBRmax)
+    #df.bt$OzT <- df.bt$OzCBI / 3
+    
+    #df.br <- betareg(OzT ~ RBRmax, df.bt)
+    
+    
     ### Quadratic model
     df.ln <- dplyr::select(df.f, OzCBI, RBRmax)
 
     fm <- lm(OzCBI ~ RBRmax + I(RBRmax^2), data = df.ln)
     
     df.w$predict.cbi <- predict(fm, df.w)
-    df.w <- mutate(df.w, predict = case_when(predict.cbi == 0 ~ "U", 
-                                                   predict.cbi<= 0.5 ~ "L", 
-                                                   predict.cbi <= 1.4 ~ "M", 
-                                                   predict.cbi <= 2.0 ~ "H",
-                                                TRUE ~ "VH")) 
+    
+    df.w <- mutate(df.w, predict = case_when(predict.cbi <= t1 ~ "U", 
+                                             predict.cbi <= t2 ~ "L", 
+                                             predict.cbi <= t3 ~ "M",
+                                             predict.cbi <= t4 ~ "H",
+                                             TRUE ~ "VH")) 
 
     df.w$predict <- factor(df.w$predict, levels = c("U", "L", "M", "H", "VH"))
     #plot(df.w$predict, df.w$OzCBI)
